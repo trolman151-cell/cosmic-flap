@@ -292,4 +292,16 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`Cosmic Flap server on :${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Cosmic Flap server on :${PORT}`);
+
+  // Keep Render free tier awake — ping /health every 14 minutes
+  const selfUrl = process.env.RENDER_EXTERNAL_URL;
+  if (selfUrl) {
+    setInterval(() => {
+      fetch(`${selfUrl}/health`)
+        .then(() => console.log('keep-alive ping ok'))
+        .catch((e) => console.warn('keep-alive ping failed:', e.message));
+    }, 14 * 60 * 1000);
+  }
+});
