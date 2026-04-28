@@ -54,7 +54,7 @@ const PIPE_INTERVAL = 90;
 const PIPE_MIN_TOP  = 80;
 const PIPE_MAX_TOP  = CANVAS_HEIGHT - PIPE_GAP - 80;
 const GROUND_Y      = CANVAS_HEIGHT - 60;
-const TICK_MS       = 1000 / 20; // 20 fps — keeps free-tier CPU comfortable
+const TICK_MS       = 1000 / 30; // 30 fps — good balance of smoothness vs CPU
 
 // ── Rooms ────────────────────────────────────────────────
 const rooms = new Map(); // roomId → Room
@@ -62,15 +62,16 @@ const rooms = new Map(); // roomId → Room
 function makeRoom(roomId) {
   return {
     id: roomId,
-    players: {},      // socketId → player state
+    players: {},
     pipes: [],
     started: false,
     finished: false,
     countdown: 0,
     frame: 0,
-    interval: null,
+    interval: null,         // game loop interval
+    countdownInterval: null, // countdown interval (tracked separately so reset can clear it)
     podium: [],
-    hostId: null,     // first player to join
+    hostId: null,
   };
 }
 
@@ -177,16 +178,19 @@ function broadcastState(room) {
 }
 
 function startCountdown(room) {
+  // Clear any previous countdown that might still be running
+  if (room.countdownInterval) { clearInterval(room.countdownInterval); room.countdownInterval = null; }
+
   room.countdown = 3;
   broadcastState(room);
 
-  const tick = setInterval(() => {
+  room.countdownInterval = setInterval(() => {
     room.countdown--;
     if (room.countdown <= 0) {
-      clearInterval(tick);
+      clearInterval(room.countdownInterval);
+      room.countdownInterval = null;
       room.countdown = 0;
       room.started = true;
-      // Reset all birds to start position
       Object.values(room.players).forEach((p) => {
         p.y = CANVAS_HEIGHT / 2;
         p.velocity = 0;
@@ -263,19 +267,24 @@ io.on('connection', (socket) => {
     startCountdown(room);
   });
 
-  // Reset room back to waiting state after a game finishes
+  // Reset room back to waiting state — only process the first reset per match
   socket.on('room:reset', () => {
     const roomId = socket.data.roomId;
     if (!roomId) return;
     const room = rooms.get(roomId);
     if (!room) return;
-    clearInterval(room.interval);
-    room.started  = false;
-    room.finished = false;
-    room.pipes    = [];
-    room.frame    = 0;
+    if (!room.started && !room.finished) return; // already reset, ignore duplicate resets
+
+    // Clear both intervals so nothing fires after reset
+    clearInterval(room.interval);       room.interval = null;
+    clearInterval(room.countdownInterval); room.countdownInterval = null;
+
+    room.started   = false;
+    room.finished  = false;
+    room.pipes     = [];
+    room.frame     = 0;
     room.countdown = 0;
-    room.podium   = [];
+    room.podium    = [];
     Object.values(room.players).forEach((p) => {
       p.y = CANVAS_HEIGHT / 2;
       p.velocity = 0;
@@ -297,6 +306,7 @@ io.on('connection', (socket) => {
 
     if (Object.keys(room.players).length === 0) {
       clearInterval(room.interval);
+      clearInterval(room.countdownInterval);
       rooms.delete(roomId);
     } else {
       // Migrate host to next available player

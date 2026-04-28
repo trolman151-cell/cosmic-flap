@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Socket } from 'socket.io-client';
-import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../game/constants';
+import { CANVAS_WIDTH, CANVAS_HEIGHT, GRAVITY, FLAP_STRENGTH } from '../game/constants';
 import {
   drawBackground, drawGround, drawPipes, drawBird,
   drawScore, drawGhostBird,
@@ -8,6 +8,9 @@ import {
 import { BIRD_SKINS } from '../types';
 import type { Screen, PodiumEntry, Player, Pipe } from '../types';
 import './screens.css';
+
+// How often the server sends state (ms) — used for extrapolation
+const SERVER_TICK_MS = 1000 / 30;
 
 interface Props {
   socket: Socket;
@@ -25,45 +28,62 @@ export default function MultiplayerGame({
   const rafRef    = useRef<number>(0);
   const scrollRef = useRef(0);
 
-  // Ref holds latest server state — read inside RAF loop (no re-render cost)
+  // Latest authoritative state from server — written by socket events, read by RAF
   const gameRef = useRef<{
     players: Record<string, Player>;
     pipes: Pipe[];
     myId: string;
-  }>({ players: {}, pipes: [], myId: '' });
+    lastUpdate: number; // timestamp of last server state packet
+  }>({
+    players: {},
+    pipes: [],
+    myId: socket.id ?? '',  // initialise immediately — don't wait for room:joined
+    lastUpdate: Date.now(),
+  });
 
-  // React state drives overlay / HUD re-renders
-  const [myId,      setMyId]      = useState('');
-  const [hostId,    setHostId]    = useState('');
-  const [isStarted, setIsStarted] = useState(false);
+  // React state drives overlays/HUD re-renders
+  // Seed myId from socket.id so host check works on remount (room:joined won't re-fire)
+  const [myId,       setMyId]       = useState(socket.id ?? '');
+  const [hostId,     setHostId]     = useState('');
+  const [isStarted,  setIsStarted]  = useState(false);
   const [aliveCount, setAliveCount] = useState(0);
-  const [countdown, setCountdown] = useState(0);
-  const [roomCode,  setRoomCode]  = useState(roomId);
-  const [waitMsg,   setWaitMsg]   = useState('Connecting...');
+  const [countdown,  setCountdown]  = useState(0);
+  const [roomCode,   setRoomCode]   = useState(roomId);
+  const [waitMsg,    setWaitMsg]    = useState('Connecting...');
 
   const skin = BIRD_SKINS.find((s) => s.id === skinId) ?? BIRD_SKINS[0];
 
+  // Flap: send to server AND apply locally immediately for zero perceived input lag
   const handleFlap = useCallback(() => {
     socket.emit('player:flap');
+    const me = gameRef.current.players[gameRef.current.myId];
+    if (me?.alive) me.velocity = FLAP_STRENGTH;
   }, [socket]);
 
   // ── Socket events ──────────────────────────────────────
   useEffect(() => {
+    // room:joined only fires on first join — not on remount after reset
     socket.on('room:joined', ({ roomId: rid, playerId }) => {
+      gameRef.current.myId = playerId;
       setMyId(playerId);
       setRoomCode(rid);
-      gameRef.current.myId = playerId;
       setWaitMsg(`Room: ${rid}  •  Waiting for players...`);
     });
 
     socket.on('room:state', (data) => {
-      // Update the ref used by the canvas loop
-      gameRef.current.players = data.players;
-      gameRef.current.pipes   = data.pipes;
+      gameRef.current.players    = data.players;
+      gameRef.current.pipes      = data.pipes;
+      gameRef.current.lastUpdate = Date.now();
 
-      // Update React state to trigger UI re-renders
+      // If myId isn't set yet (remount case), pull it from socket
+      if (!gameRef.current.myId && socket.id) {
+        gameRef.current.myId = socket.id;
+        setMyId(socket.id);
+      }
+
       const alive = Object.values(data.players as Record<string, Player>)
         .filter((p) => p.alive).length;
+
       setAliveCount(alive);
       setIsStarted(data.started);
       setHostId(data.hostId ?? '');
@@ -86,9 +106,9 @@ export default function MultiplayerGame({
       socket.off('room:state');
       socket.off('room:error');
     };
-  }, [socket, onGameOver]);
+  }, [socket, roomCode, onGameOver]);
 
-  // ── Canvas render loop (runs once, reads ref) ──────────
+  // ── Canvas render loop ─────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -97,7 +117,10 @@ export default function MultiplayerGame({
 
     function loop() {
       frame++;
-      const { players, pipes, myId: id } = gameRef.current;
+      const { players, pipes, myId: id, lastUpdate } = gameRef.current;
+
+      // Fraction of a server tick elapsed since last update (for extrapolation)
+      const dt = Math.min((Date.now() - lastUpdate) / SERVER_TICK_MS, 2);
 
       drawBackground(ctx, frame);
       drawPipes(ctx, pipes);
@@ -106,16 +129,20 @@ export default function MultiplayerGame({
       if (me?.alive) scrollRef.current += 3;
       drawGround(ctx, scrollRef.current);
 
-      // Draw remote players first (behind local player)
+      // Draw remote players (behind local)
       Object.entries(players).forEach(([pid, p]) => {
-        if (pid !== id) {
-          drawGhostBird(ctx, p.y, p.velocity, p.skinId, p.name || 'Pilot', frame, p.alive);
-        }
+        if (pid === id) return;
+        // Extrapolate position: y + velocity*dt (smooth out 30fps → 60fps)
+        const eY = p.alive ? p.y + p.velocity * dt : p.y;
+        drawGhostBird(ctx, eY, p.velocity, p.skinId, p.name || 'Pilot', frame, p.alive);
       });
 
-      // Draw local player on top
+      // Draw local player (extrapolate with gravity for accurate arc)
       if (me) {
-        drawBird(ctx, me.y, me.velocity, skin, frame, me.alive);
+        const eY = me.alive
+          ? me.y + me.velocity * dt + 0.5 * GRAVITY * dt * dt
+          : me.y;
+        drawBird(ctx, eY, me.velocity, skin, frame, me.alive);
         drawScore(ctx, me.score);
       }
 
@@ -124,7 +151,7 @@ export default function MultiplayerGame({
 
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [skin]); // only re-create loop if skin changes
+  }, [skin]);
 
   // ── Keyboard ───────────────────────────────────────────
   useEffect(() => {
@@ -138,7 +165,6 @@ export default function MultiplayerGame({
   // ── Render ─────────────────────────────────────────────
   return (
     <div className="screen game-screen">
-      {/* HUD — uses React state so it updates live */}
       <div className="mp-hud">
         <button
           className="back-btn-inline"
@@ -147,9 +173,7 @@ export default function MultiplayerGame({
           ✕
         </button>
         <span className="mp-room-tag">#{roomCode}</span>
-        {isStarted && (
-          <span className="mp-players-tag">{aliveCount} alive</span>
-        )}
+        {isStarted && <span className="mp-players-tag">{aliveCount} alive</span>}
       </div>
 
       <canvas
@@ -162,7 +186,7 @@ export default function MultiplayerGame({
         style={{ touchAction: 'none' }}
       />
 
-      {/* Waiting overlay — disappears as soon as server sends started:true */}
+      {/* Overlay disappears the moment isStarted flips to true */}
       {!isStarted && countdown === 0 && (
         <div className="mp-wait-overlay">
           <p>{waitMsg}</p>
