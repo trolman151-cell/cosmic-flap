@@ -1,6 +1,7 @@
 const express = require('express');
 const http    = require('http');
 const path    = require('path');
+const fs      = require('fs');
 const { Server } = require('socket.io');
 const cors    = require('cors');
 
@@ -13,11 +14,29 @@ const io     = new Server(server, {
 app.use(cors());
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// Serve built frontend in production
-const distDir = path.join(__dirname, '../dist');
-app.use(express.static(distDir));
+// Serve built frontend
+// Try two possible locations (handles different deploy environments)
+const distCandidates = [
+  path.join(__dirname, '../dist'),
+  path.join(process.cwd(), 'dist'),
+  path.join(__dirname, 'dist'),
+];
+const distDir = distCandidates.find(p => fs.existsSync(path.join(p, 'index.html')));
+
+console.log('__dirname   :', __dirname);
+console.log('cwd         :', process.cwd());
+console.log('dist found  :', distDir ?? 'NOT FOUND');
+
+if (distDir) {
+  app.use(express.static(distDir));
+}
+
 app.get(/.*/, (_req, res) => {
-  res.sendFile(path.join(distDir, 'index.html'));
+  if (distDir) {
+    res.sendFile(path.join(distDir, 'index.html'));
+  } else {
+    res.status(503).send('Frontend not built yet — dist folder missing');
+  }
 });
 
 // ── Game constants (must match client) ──────────────────
