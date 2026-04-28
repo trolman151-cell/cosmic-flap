@@ -16,7 +16,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 // Serve built frontend in production
 const distDir = path.join(__dirname, '../dist');
 app.use(express.static(distDir));
-app.get('*', (_req, res) => {
+app.get(/.*/, (_req, res) => {
   res.sendFile(path.join(distDir, 'index.html'));
 });
 
