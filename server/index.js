@@ -54,7 +54,7 @@ const PIPE_INTERVAL = 90;
 const PIPE_MIN_TOP  = 80;
 const PIPE_MAX_TOP  = CANVAS_HEIGHT - PIPE_GAP - 80;
 const GROUND_Y      = CANVAS_HEIGHT - 60;
-const TICK_MS       = 1000 / 60; // 60 fps server tick
+const TICK_MS       = 1000 / 20; // 20 fps — keeps free-tier CPU comfortable
 
 // ── Rooms ────────────────────────────────────────────────
 const rooms = new Map(); // roomId → Room
@@ -165,6 +165,7 @@ function finishRoom(room) {
 
 function broadcastState(room) {
   io.to(room.id).emit('room:state', {
+    roomId: room.id,
     players: room.players,
     pipes: room.pipes,
     started: room.started,

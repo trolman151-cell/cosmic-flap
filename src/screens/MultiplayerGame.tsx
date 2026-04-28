@@ -3,12 +3,11 @@ import { Socket } from 'socket.io-client';
 import { CANVAS_WIDTH, CANVAS_HEIGHT } from '../game/constants';
 import {
   drawBackground, drawGround, drawPipes, drawBird,
-  drawScore, drawOverlay, drawCountdown, drawGhostBird,
+  drawScore, drawGhostBird,
 } from '../game/renderer';
 import { BIRD_SKINS } from '../types';
 import type { Screen, PodiumEntry, Player, Pipe } from '../types';
 import './screens.css';
-
 
 interface Props {
   socket: Socket;
@@ -22,22 +21,25 @@ interface Props {
 export default function MultiplayerGame({
   socket, roomId, skinId, playerName: _playerName, onGameOver, onNavigate,
 }: Props) {
-  const canvasRef    = useRef<HTMLCanvasElement>(null);
-  const rafRef       = useRef<number>(0);
-  const scrollRef    = useRef(0);
-  const stateRef     = useRef<{
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rafRef    = useRef<number>(0);
+  const scrollRef = useRef(0);
+
+  // Ref holds latest server state — read inside RAF loop (no re-render cost)
+  const gameRef = useRef<{
     players: Record<string, Player>;
     pipes: Pipe[];
-    started: boolean;
-    finished: boolean;
-    countdown: number;
     myId: string;
-    hostId: string;
-  }>({ players: {}, pipes: [], started: false, finished: false, countdown: 3, myId: '', hostId: '' });
+  }>({ players: {}, pipes: [], myId: '' });
 
-  const [waitMsg, setWaitMsg]   = useState('Connecting...');
-  const [myId, setMyId]         = useState('');
-  const [roomCode, setRoomCode] = useState(roomId);
+  // React state drives overlay / HUD re-renders
+  const [myId,      setMyId]      = useState('');
+  const [hostId,    setHostId]    = useState('');
+  const [isStarted, setIsStarted] = useState(false);
+  const [aliveCount, setAliveCount] = useState(0);
+  const [countdown, setCountdown] = useState(0);
+  const [roomCode,  setRoomCode]  = useState(roomId);
+  const [waitMsg,   setWaitMsg]   = useState('Connecting...');
 
   const skin = BIRD_SKINS.find((s) => s.id === skinId) ?? BIRD_SKINS[0];
 
@@ -45,72 +47,76 @@ export default function MultiplayerGame({
     socket.emit('player:flap');
   }, [socket]);
 
+  // ── Socket events ──────────────────────────────────────
   useEffect(() => {
     socket.on('room:joined', ({ roomId: rid, playerId }) => {
       setMyId(playerId);
       setRoomCode(rid);
-      stateRef.current.myId = playerId;
+      gameRef.current.myId = playerId;
       setWaitMsg(`Room: ${rid}  •  Waiting for players...`);
     });
 
     socket.on('room:state', (data) => {
-      stateRef.current.players   = data.players;
-      stateRef.current.pipes     = data.pipes;
-      stateRef.current.started   = data.started;
-      stateRef.current.finished  = data.finished;
-      stateRef.current.countdown = data.countdown;
-      stateRef.current.hostId    = data.hostId ?? '';
+      // Update the ref used by the canvas loop
+      gameRef.current.players = data.players;
+      gameRef.current.pipes   = data.pipes;
+
+      // Update React state to trigger UI re-renders
+      const alive = Object.values(data.players as Record<string, Player>)
+        .filter((p) => p.alive).length;
+      setAliveCount(alive);
+      setIsStarted(data.started);
+      setHostId(data.hostId ?? '');
+      setCountdown(data.countdown ?? 0);
 
       if (!data.started && !data.finished) {
-        setWaitMsg(`Room: ${roomCode}  •  ${Object.keys(data.players).length} pilot(s) ready`);
+        const count = Object.keys(data.players).length;
+        setWaitMsg(`Room: ${data.roomId ?? roomCode}  •  ${count} pilot(s) ready`);
       }
 
-      if (data.finished && data.podium.length) {
+      if (data.finished && data.podium?.length) {
         onGameOver(data.podium);
       }
     });
 
-    socket.on('room:error', (msg) => setWaitMsg(`Error: ${msg}`));
+    socket.on('room:error', (msg: string) => setWaitMsg(`Error: ${msg}`));
 
     return () => {
       socket.off('room:joined');
       socket.off('room:state');
       socket.off('room:error');
     };
-  }, [socket, roomCode, onGameOver]);
+  }, [socket, onGameOver]);
 
+  // ── Canvas render loop (runs once, reads ref) ──────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d')!;
+    let frame = 0;
 
     function loop() {
-      const s = stateRef.current;
+      frame++;
+      const { players, pipes, myId: id } = gameRef.current;
 
-      drawBackground(ctx, Date.now() / 16);
-      drawPipes(ctx, s.pipes);
+      drawBackground(ctx, frame);
+      drawPipes(ctx, pipes);
+
+      const me = players[id];
+      if (me?.alive) scrollRef.current += 3;
       drawGround(ctx, scrollRef.current);
 
-      // Draw all players
-      Object.entries(s.players).forEach(([id, p]) => {
-        if (id === s.myId) {
-          if (p.alive) scrollRef.current += 3;
-          drawBird(ctx, p.y, p.velocity, skin, Date.now() / 16, p.alive);
-        } else {
-          drawGhostBird(ctx, p.y, p.velocity, p.skinId, p.name || 'Pilot', Date.now() / 16, p.alive);
+      // Draw remote players first (behind local player)
+      Object.entries(players).forEach(([pid, p]) => {
+        if (pid !== id) {
+          drawGhostBird(ctx, p.y, p.velocity, p.skinId, p.name || 'Pilot', frame, p.alive);
         }
       });
 
-      // Score of local player
-      const me = s.players[s.myId];
-      if (me) drawScore(ctx, me.score);
-
-      if (!s.started && s.countdown > 0) {
-        drawCountdown(ctx, s.countdown);
-      }
-
-      if (!s.started && s.countdown === 0 && Object.keys(s.players).length === 0) {
-        drawOverlay(ctx, 'WAITING...', waitMsg);
+      // Draw local player on top
+      if (me) {
+        drawBird(ctx, me.y, me.velocity, skin, frame, me.alive);
+        drawScore(ctx, me.score);
       }
 
       rafRef.current = requestAnimationFrame(loop);
@@ -118,8 +124,9 @@ export default function MultiplayerGame({
 
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [skin, waitMsg]);
+  }, [skin]); // only re-create loop if skin changes
 
+  // ── Keyboard ───────────────────────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); handleFlap(); }
@@ -128,19 +135,23 @@ export default function MultiplayerGame({
     return () => window.removeEventListener('keydown', onKey);
   }, [handleFlap]);
 
-  const s = stateRef.current;
-
+  // ── Render ─────────────────────────────────────────────
   return (
     <div className="screen game-screen">
+      {/* HUD — uses React state so it updates live */}
       <div className="mp-hud">
-        <button className="back-btn-inline" onClick={() => { cancelAnimationFrame(rafRef.current); socket.disconnect(); onNavigate('lobby'); }}>
+        <button
+          className="back-btn-inline"
+          onClick={() => { cancelAnimationFrame(rafRef.current); socket.disconnect(); onNavigate('lobby'); }}
+        >
           ✕
         </button>
         <span className="mp-room-tag">#{roomCode}</span>
-        <span className="mp-players-tag">
-          {Object.values(s.players).filter((p) => p.alive).length} alive
-        </span>
+        {isStarted && (
+          <span className="mp-players-tag">{aliveCount} alive</span>
+        )}
       </div>
+
       <canvas
         ref={canvasRef}
         width={CANVAS_WIDTH}
@@ -150,10 +161,12 @@ export default function MultiplayerGame({
         onTouchStart={(e) => { e.preventDefault(); handleFlap(); }}
         style={{ touchAction: 'none' }}
       />
-      {!s.started && (
+
+      {/* Waiting overlay — disappears as soon as server sends started:true */}
+      {!isStarted && countdown === 0 && (
         <div className="mp-wait-overlay">
           <p>{waitMsg}</p>
-          {myId === s.hostId ? (
+          {myId === hostId ? (
             <button className="btn btn-primary" onClick={() => socket.emit('room:start')}>
               ▶ START GAME
             </button>
