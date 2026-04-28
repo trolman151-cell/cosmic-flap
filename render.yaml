@@ -2,7 +2,7 @@ services:
   - type: web
     name: cosmic-flap
     runtime: node
-    buildCommand: npm install --legacy-peer-deps && npm run build
+    buildCommand: npm install && npm run build
     startCommand: node server/index.js
     envVars:
       - key: NODE_ENV
