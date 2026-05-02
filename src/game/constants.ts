@@ -5,12 +5,12 @@ export const CANVAS_HEIGHT = 700;
 export const BIRD_X        = 80;
 export const BIRD_RADIUS   = 16;
 export const GRAVITY       = 0.45;
-export const FLAP_STRENGTH = -8.5;
+export const FLAP_STRENGTH = -7.0;
 export const MAX_FALL_VEL  = 12;
 
 // Pipes
 export const PIPE_WIDTH    = 60;
-export const PIPE_GAP      = 170;
+export const PIPE_GAP      = 190;
 export const PIPE_SPEED    = 3;
 export const PIPE_SPAWN_X  = CANVAS_WIDTH + PIPE_WIDTH;
 export const PIPE_INTERVAL = 90; // frames between spawns

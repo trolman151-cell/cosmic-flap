@@ -33,11 +33,13 @@ export default function MultiplayerGame({
     players: Record<string, Player>;
     pipes: Pipe[];
     myId: string;
+    started: boolean;
     lastUpdate: number; // timestamp of last server state packet
   }>({
     players: {},
     pipes: [],
     myId: socket.id ?? '',  // initialise immediately — don't wait for room:joined
+    started: false,
     lastUpdate: Date.now(),
   });
 
@@ -57,7 +59,7 @@ export default function MultiplayerGame({
   const handleFlap = useCallback(() => {
     socket.emit('player:flap');
     const me = gameRef.current.players[gameRef.current.myId];
-    if (me?.alive) me.velocity = FLAP_STRENGTH;
+    if (me?.alive && gameRef.current.started) me.velocity = FLAP_STRENGTH;
   }, [socket]);
 
   // ── Socket events ──────────────────────────────────────
@@ -73,6 +75,7 @@ export default function MultiplayerGame({
     socket.on('room:state', (data) => {
       gameRef.current.players    = data.players;
       gameRef.current.pipes      = data.pipes;
+      gameRef.current.started    = data.started;
       gameRef.current.lastUpdate = Date.now();
 
       // If myId isn't set yet (remount case), pull it from socket

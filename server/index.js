@@ -45,10 +45,10 @@ const CANVAS_HEIGHT = 700;
 const BIRD_X        = 80;
 const BIRD_RADIUS   = 16;
 const GRAVITY       = 0.45;
-const FLAP_STRENGTH = -8.5;
+const FLAP_STRENGTH = -7.0;
 const MAX_FALL_VEL  = 12;
 const PIPE_WIDTH    = 60;
-const PIPE_GAP      = 170;
+const PIPE_GAP      = 190;
 const PIPE_SPEED    = 3;
 const PIPE_INTERVAL = 90;
 const PIPE_MIN_TOP  = 80;
@@ -144,7 +144,8 @@ function stepRoom(room) {
 
 function finishRoom(room) {
   room.finished = true;
-  clearInterval(room.interval);
+  clearInterval(room.interval);       room.interval = null;
+  clearInterval(room.countdownInterval); room.countdownInterval = null;
 
   // Build podium sorted by score desc then by time of death (alive players last)
   const sorted = Object.entries(room.players)
